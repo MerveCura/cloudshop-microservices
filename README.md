@@ -49,9 +49,9 @@ The target architecture is:
         Nginx / Ingress              Monitoring
               |                  Prometheus + Grafana
               |
-      +-------+-------+-------+
-      |               |       |
-      v               v       v
+      +-------+-------+-------------------+
+      |               |                   |
+      v               v                   v
  User Service    Product Service    Order Service
     Flask             Flask             Flask
       |                 |                 |
