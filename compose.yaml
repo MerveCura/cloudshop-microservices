@@ -1,0 +1,21 @@
+services:
+
+  user-service:
+    build:
+      context: ./services/user-service
+    ports:
+      - "5000:5000"
+
+  product-service:
+    build:
+      context: ./services/product-service
+    ports:
+      - "5001:5001"
+
+  order-service:
+    build:
+      context: ./services/order-service
+    ports:
+      - "5002:5002"
+
+     
