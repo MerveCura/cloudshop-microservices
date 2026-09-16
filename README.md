@@ -2,7 +2,7 @@
 
 CloudShop is a cloud-native e-commerce microservices project built to practice and demonstrate real-world Cloud and DevOps concepts.
 
-The project is being developed incrementally, starting with local microservice development, Docker containerization, and multi-container orchestration. It will later be extended with persistent databases, caching, reverse proxy routing, CI/CD, Kubernetes, cloud deployment, and observability.
+The project is being developed incrementally, starting with local microservice development, Docker containerization, multi-container orchestration, and Redis caching. It will later be extended with persistent databases, reverse proxy routing, CI/CD, Kubernetes, cloud deployment, and observability.
 
 ## Project Goals
 
@@ -14,6 +14,9 @@ The main goals of this project are to:
 - Practice Docker networking and service discovery
 - Manage multi-container environments with Docker Compose
 - Implement service-to-service communication
+- Implement caching with Redis
+- Manage application configuration using environment variables
+- Practice service health checks and failure handling
 - Apply CI/CD practices with GitHub Actions
 - Deploy containerized workloads to cloud environments
 - Learn Kubernetes deployment and service management
@@ -92,6 +95,7 @@ Each stage is implemented incrementally rather than added only as documentation.
 cloudshop-microservices/
 │
 ├── compose.yaml
+├── .env.example
 │
 ├── services/
 │   │
@@ -160,7 +164,23 @@ GET /products
 GET /products/<product_id>
 ```
 
-`GET /products` returns the available products.
+`GET /products` returns the available products and uses Redis as a caching layer.
+
+When the endpoint is requested, Product Service first checks Redis for cached product data.
+
+If cached data exists, the response is returned from Redis:
+
+```text
+Cache HIT → Redis → Response
+```
+
+If cached data does not exist, Product Service retrieves the current in-memory product data, stores it in Redis with a configured TTL, and returns the response:
+
+```text
+Cache MISS → Application Data → Redis Cache → Response
+```
+
+The API response indicates whether the data was returned from the application or from the cache.
 
 `GET /products/<product_id>` returns a specific product based on its ID.
 
@@ -176,7 +196,7 @@ The service runs on port:
 5001
 ```
 
-Product data is currently stored in memory and will later be moved to persistent storage.
+Product data is currently stored in memory as the source of truth and will later be moved to persistent storage. Redis is currently used as a cache rather than as the primary database.
 
 ### Order Service
 
@@ -279,6 +299,9 @@ Each image:
 | User Service | `5000` | `5000` |
 | Product Service | `5001` | `5001` |
 | Order Service | `5002` | `5002` |
+| Redis | `6379` | Not published |
+
+Redis is only required by services inside the Docker Compose network, so its port is not published to the host machine.
 
 For example:
 
@@ -328,6 +351,7 @@ currently manages:
 - User Service
 - Product Service
 - Order Service
+- Redis
 
 The complete environment can be built and started using:
 
@@ -341,7 +365,7 @@ Running services can be inspected using:
 docker compose ps
 ```
 
-Instead of manually building and starting every container, Docker Compose now manages all three services as a single application environment.
+Instead of manually building and starting every container, Docker Compose manages the services and Redis as a single application environment.
 
 ## Docker Compose Networking
 
@@ -350,16 +374,20 @@ Docker Compose automatically creates a shared network for the CloudShop services
 Current container architecture:
 
 ```text
-                  Docker Compose Network
-                           |
-              +------------+------------+
-              |            |            |
-              v            v            v
-        User Service  Product Service  Order Service
-            :5000          :5001          :5002
+                      Docker Compose Network
+                              |
+              +---------------+---------------+
+              |               |               |
+              v               v               v
+        User Service    Product Service    Order Service
+            :5000            :5001            :5002
+                              |
+                              v
+                            Redis
+                            :6379
 ```
 
-All three containers can communicate through this internal network.
+All containers can communicate through this internal network.
 
 This means services do not need to know each other's dynamically assigned container IP addresses.
 
@@ -385,7 +413,13 @@ docker compose exec order-service getent hosts product-service
 
 Docker's internal DNS successfully resolved the Product Service name to its container network address.
 
-This avoids relying on hard-coded container IP addresses.
+The same mechanism allows Product Service to connect to Redis using:
+
+```text
+redis:6379
+```
+
+instead of relying on a hard-coded container IP address.
 
 ## Container-to-Container Communication
 
@@ -417,9 +451,187 @@ This confirms that the services can communicate over the Docker Compose network.
 
 Order Service does not yet automatically call Product Service from its application code. The current implementation verifies the networking and HTTP communication foundation required for future service-to-service integration.
 
+Product Service also communicates with Redis through the same Docker Compose network:
+
+```text
+Product Service
+      |
+      | Redis connection
+      v
+ redis:6379
+      |
+      v
+    Redis
+```
+
+## Redis Caching
+
+Redis is integrated into the local CloudShop environment as a caching layer for Product Service.
+
+The current cache-aside flow is:
+
+```text
+Client
+  |
+  v
+Product Service
+  |
+  v
+Check Redis
+  |
+  +---- Cache HIT ----> Return cached product data
+  |
+  +---- Cache MISS ---> Read application data
+                         |
+                         v
+                      Store in Redis
+                         |
+                         v
+                       Response
+```
+
+Cached product data is stored with a TTL (Time To Live). After the TTL expires, Redis automatically removes the cached entry and the next request becomes a cache miss.
+
+The TTL is configurable using an environment variable.
+
+Redis cache contents and TTL values can be inspected directly using:
+
+```bash
+docker compose exec redis redis-cli GET products
+docker compose exec redis redis-cli TTL products
+```
+
+Cached product data can be manually removed using:
+
+```bash
+docker compose exec redis redis-cli DEL products
+```
+
+Cache hit and cache miss behavior has been tested through the Product Service API.
+
+## Redis Failure Handling
+
+Redis is treated as an optional caching dependency rather than the primary source of product data.
+
+Redis operations in Product Service are protected with error handling.
+
+If Redis becomes unavailable, Product Service logs the Redis error and falls back to the current application data instead of failing the entire request.
+
+The intended behavior is:
+
+```text
+Redis available
+      |
+      v
+Use cache normally
+
+Redis unavailable
+      |
+      v
+Log Redis error
+      |
+      v
+Fallback to application data
+      |
+      v
+Return HTTP 200 response
+```
+
+Redis failure was tested by stopping the Redis service while Product Service remained running.
+
+The Product Service continued returning product data, demonstrating graceful degradation of the caching dependency.
+
+The failure test also demonstrated that dependency failures can increase request latency even when the application remains available.
+
+## Environment Configuration
+
+Redis connection settings and cache configuration are externalized using environment variables instead of being hard-coded into the Product Service application.
+
+Current configuration includes:
+
+```text
+REDIS_HOST
+REDIS_PORT
+CACHE_TTL
+```
+
+Docker Compose reads the local `.env` configuration and injects the required values into the Product Service container.
+
+The application accesses these values using Python environment variables.
+
+The configuration flow is:
+
+```text
+.env
+  |
+  v
+Docker Compose
+  |
+  v
+Container Environment Variables
+  |
+  v
+Product Service
+```
+
+The local `.env` file is excluded from Git version control.
+
+A safe `.env.example` file is included in the repository to document the required configuration without exposing environment-specific or sensitive values.
+
+Environment variables are used for configuration externalization and are not treated as a complete secrets-management solution. Dedicated secrets management will be introduced later.
+
+## Redis Health Check and Service Dependency
+
+Redis includes a Docker health check using:
+
+```text
+redis-cli ping
+```
+
+A successful Redis health check returns:
+
+```text
+PONG
+```
+
+and Docker marks the Redis container as healthy.
+
+Product Service uses Docker Compose dependency configuration with:
+
+```yaml
+depends_on:
+  redis:
+    condition: service_healthy
+```
+
+This ensures that Product Service waits for Redis to pass its health check during startup.
+
+The startup flow is:
+
+```text
+Start Redis
+    |
+    v
+Redis Health Check
+    |
+    v
+redis-cli ping
+    |
+    v
+PONG
+    |
+    v
+Redis = healthy
+    |
+    v
+Start Product Service
+```
+
+Startup dependency management does not replace runtime failure handling. If Redis becomes unavailable after startup, Product Service still relies on its application-level fallback behavior.
+
 ## Host Access vs Internal Communication
 
-For local development, the services can currently be accessed from the host machine using:
+For local development, the Flask services can currently be accessed from the host machine using:
 
 ```text
 http://localhost:5000
@@ -441,14 +653,17 @@ Inside the Docker Compose network, containers communicate using service names:
 user-service:5000
 product-service:5001
 order-service:5002
+redis:6379
 ```
+
+Redis does not require a host port because Product Service accesses it internally through the Docker Compose network.
 
 Therefore, internal container communication does not depend on host ports or hard-coded container IP addresses.
 
 ## Current Local Architecture
 
 ```text
-                         Host Machine
+                          Host Machine
                               |
               +---------------+---------------+
               |               |               |
@@ -456,12 +671,16 @@ Therefore, internal container communication does not depend on host ports or har
               |               |               |
               v               v               v
         User Service    Product Service    Order Service
-              |               ^               |
-              |               |               |
-              +------ Docker Compose Network--+
+                              |
+                              | Cache
+                              v
+                            Redis
+                            :6379
+                              |
+                    Docker Compose Network
 ```
 
-The current architecture establishes the initial multi-service foundation of CloudShop.
+The current architecture establishes the multi-service foundation of CloudShop with an internal Redis caching layer.
 
 ## Docker Operations Practiced
 
@@ -498,6 +717,13 @@ The project has also been used to practice:
 - Docker networking
 - DNS-based service discovery
 - Container-to-container HTTP communication
+- Redis caching
+- Cache hit and cache miss behavior
+- Cache TTL
+- Environment-based container configuration
+- Docker health checks
+- Service startup dependencies
+- Runtime dependency failure handling
 
 ## Development Workflow
 
@@ -555,6 +781,20 @@ Completed:
 - Shared Docker network created
 - DNS-based service discovery verified
 - Container-to-container HTTP communication verified
+- Redis added to the Docker Compose environment
+- Product Service connected to Redis through Docker networking
+- Redis caching implemented for product data
+- Cache hit and cache miss behavior verified
+- Redis cache TTL implemented and tested
+- Redis data and TTL inspected using `redis-cli`
+- Redis configuration externalized using environment variables
+- `.env` and `.env.example` configuration introduced
+- Local `.env` excluded from Git version control
+- Redis health check configured
+- Product Service startup dependency configured using Redis health status
+- Redis failure behavior tested
+- Product Service fallback behavior verified when Redis is unavailable
+- Redis failure logs inspected during troubleshooting
 
 ## Next Steps
 
@@ -562,12 +802,8 @@ The project will be expanded incrementally with:
 
 - Persistent databases
 - Docker volumes
-- Redis caching
 - Real service-to-service application logic
 - Nginx reverse proxy and routing
-- Environment variables
-- `.env` configuration
-- Docker health checks
 - Container image optimization
 - Multi-stage builds
 - Non-root containers
@@ -587,6 +823,7 @@ Currently used:
 
 - Python
 - Flask
+- Redis
 - Docker
 - Docker Compose
 - Git
@@ -596,7 +833,6 @@ Currently used:
 Planned:
 
 - Nginx
-- Redis
 - Databases
 - GitHub Actions
 - Container Registry
