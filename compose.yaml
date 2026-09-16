@@ -11,11 +11,26 @@ services:
       context: ./services/product-service
     ports:
       - "5001:5001"
+    environment:
+      REDIS_HOST: ${REDIS_HOST}
+      REDIS_PORT: ${REDIS_PORT}
+      CACHE_TTL: ${CACHE_TTL}
+    depends_on:
+      redis:
+        condition: service_healthy
 
   order-service:
     build:
       context: ./services/order-service
     ports:
       - "5002:5002"
+
+  redis:
+    image: redis:7-alpine
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
 
      

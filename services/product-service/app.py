@@ -1,6 +1,20 @@
 from flask import Flask, jsonify
+import os
+import redis
+import json
 
 app = Flask(__name__)
+REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
+REDIS_PORT = int(os.getenv("REDIS_PORT", 6379))
+CACHE_TTL = int(os.getenv("CACHE_TTL", 60))
+
+redis_client = redis.Redis(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    decode_responses=True,
+    socket_connect_timeout=1,
+    socket_timeout=1
+)
 
 products = [
     {
@@ -26,7 +40,28 @@ def health():
 
 @app.get("/products")
 def get_products():
-    return jsonify(products)
+    try:
+        cached_products = redis_client.get("products")
+        
+        if cached_products:
+            app.logger.info("Cache HIT for products")
+            return {
+                "source": "cache",
+                "data": json.loads(cached_products)
+            }
+            
+        app.logger.info("Cache MISS for products")
+        
+        redis_client.set("products", json.dumps(products), ex=CACHE_TTL)
+        
+    except redis.RedisError as error:
+        app.logger.warning(f"Redis cache error: {error}")
+        
+    return {
+        "source": "application",
+        "data": products
+    }
+  
 
 @app.get("/products/<int:product_id>")
 def get_product(product_id):
